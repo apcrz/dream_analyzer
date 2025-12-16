@@ -1,4 +1,6 @@
-import { Injectable } from '@nestjs/common';
+// src/dreams/dreams.service.ts
+
+import { Injectable, TooManyRequestsException } from '@nestjs/common';
 import { CreateDreamDto } from './dto/create-dream.dto';
 import { UpdateDreamDto } from './dto/update-dream.dto';
 

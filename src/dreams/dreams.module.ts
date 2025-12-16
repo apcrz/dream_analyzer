@@ -1,3 +1,5 @@
+// src/dreams/dreams.module.ts
+
 import { Module } from '@nestjs/common';
 import { DreamsService } from './dreams.service';
 import { DreamsController } from './dreams.controller';

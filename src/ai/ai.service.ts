@@ -40,48 +40,6 @@ export class AiService {
       this.mistralClient = new Mistral({ apiKey });
    }
 
-   private normalizeResponse(aiOutput: string): any {
-      if (!aiOutput || typeof aiOutput !== 'string') {
-         throw new Error("Resposta vazia ou inválida da IA");
-      }
-
-      let cleaned = aiOutput.replace(/```json|```/g, '').trim();
-
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-         cleaned = jsonMatch[0];
-      }
-      
-      let parsed;
-      try {
-         parsed = JSON.parse(cleaned);
-      } catch (e) {
-         throw new Error("A IA retornou JSON inválido");
-      }
-
-      const normalizeNumbers = (value: any): any => {
-         if (Array.isArray(value)) {
-            return value.map(normalizeNumbers);
-         }
-
-         if (value && typeof value === "object") {
-            const normalizedObj: any = {};
-            for (const key of Object.keys(value)) {
-               normalizedObj[key] = normalizeNumbers(value[key]);
-            }
-            return normalizedObj;
-         }
-
-         if (typeof value === "string" && /^\d+$/.test(value)) {
-            return Number(value);
-         }
-
-         return value;
-      };
-
-      return normalizeNumbers(parsed);
-   }
-
    async analyzeDream(createDreamDto: CreateDreamDto): Promise<any> {
       const dreamDescription = createDreamDto.description;
 
@@ -98,10 +56,6 @@ export class AiService {
 
          if (!rawContent) throw new Error('Resposta inválida da Mistral');
 
-         if () {
-
-         }
-         
          return this.normalizeResponseHard(rawContent);
 
       } catch (error) {
