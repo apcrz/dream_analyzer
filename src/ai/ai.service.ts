@@ -1,133 +1,165 @@
 // src/ai/ai.service.ts
 
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, BadGatewayException } from '@nestjs/common';
 import { Mistral } from '@mistralai/mistralai';
 import { ConfigService } from '@nestjs/config';
 import { CreateDreamDto } from '../dreams/dto/create-dream.dto';
+import { DreamAnalysisSchema, DreamAnalysis } from './schemas/dream-analysis.schema';
+import { ZodError } from 'zod';
 
 @Injectable()
 export class AiService {
-   private mistralClient;
+   private readonly logger = new Logger(AiService.name);
+   private readonly mistralClient: Mistral;
    private readonly MODEL = 'mistral-large-latest';
 
    private readonly SYSTEM_PROMPT = `
-    Você é um Analista de Sonhos e Numerólogo experiente.
-    Sua tarefa é receber a descrição de um sonho, fornecer uma interpretação profunda e, em seguida, gerar sugestões de números para loterias populares no Brasil (Mega-Sena, LotoFácil) e para o Jogo do Bicho, baseado em simbologia e associações numerológicas.
+      Você é um Analista de Sonhos e Numerólogo experiente.
+      Sua tarefa é receber a descrição de um sonho, fornecer uma interpretação profunda e, em seguida, gerar sugestões de números para loterias populares no Brasil (Mega-Sena, LotoFácil) e para o Jogo do Bicho, baseado em simbologia e associações numerológicas.
 
-    **Sua resposta DEVE ser um único objeto JSON válido**.
+      **Você é um sistema que responde APENAS JSON VÁLIDO**.
 
-    O JSON deve conter:
-      - interpretation (string)
-      - summary_keywords (array de strings)
-      - suggested_numbers (array de objetos)
+      REGRAS OBRIGATÓRIAS:
+      - NÃO escreva texto fora do JSON;
+      - NÃO use markdown;
+      - NÃO use aspas não escapadas;
+      - NÃO adicione comentários;
+      - NÃO quebre linhas dentro de strings;
+      - USE apenas aspas duplas válidas
 
-    Regras de Geração de Números:
-      - Mega-Sena: 6 números (1 a 60)
-      - LotoFácil: 15 números (1 a 25)
-      - Jogo do Bicho:
-          animal
-          milhar: array de 4 numeros
-          centena: array de 4 numeros
-          dezena: array de 4 numeros
+      {
+         "interpretation": "string",
+         "summary_keywords": ["string"],
+         "suggested_numbers": [
+            {
+               "game": "Mega-Sena",
+               "numbers": [number, number, number, number, number, number],
+               "rationale": "string"
+            },
+            {
+               "game": "LotoFácil",
+               "numbers": [number x15],
+               "rationale": "string"
+            },
+            {
+               "game": "Jogo do Bicho",
+               "animal": "string",
+               "milhar": [number x4],
+               "centena": [number x4],
+               "dezena": [number x4]
+            }
+         ]
+      }
+
+      Se não conseguir cumprir, responda:
+      {
+         "error": "INVALID_OUTPUT"
+      }
   `;
 
    constructor(private configService: ConfigService) {
       const apiKey = this.configService.get<string>('MISTRAL_API_KEY');
       if (!apiKey) {
+         this.logger.error('MISTRAL_API_KEY não configurada');
          throw new InternalServerErrorException('MISTRAL_API_KEY não está configurada nas variáveis de ambiente.');
       }
-
       this.mistralClient = new Mistral({ apiKey });
    }
 
-   async analyzeDream(createDreamDto: CreateDreamDto): Promise<any> {
-      const dreamDescription = createDreamDto.description;
+   private sanitizeNumbers(parsed: DreamAnalysis): DreamAnalysis {
+      return {
+         ...parsed,
+         suggested_numbers: parsed.suggested_numbers.map(item => {
+            if (item.game === 'Mega-Sena' || item.game === 'LotoFácil') {
+               const lottoItem = item as { game: 'Mega-Sena' | 'LotoFácil'; numbers: number[]; rationale: string };
+               const max = lottoItem.game === 'Mega-Sena' ? 60 : 25;
+               return {
+                  ...lottoItem,
+                  numbers: lottoItem.numbers.map(n => (n > max ? max : n)),
+               };
+            }
+
+            if (item.game === 'Jogo do Bicho') {
+               const bichoItem = item as {
+                  game: 'Jogo do Bicho';
+                  animal: string;
+                  milhar: number[];
+                  centena: number[];
+                  dezena: number[];
+               };
+               const max = 9999;
+               return {
+                  ...bichoItem,
+                  milhar: bichoItem.milhar.map(n => (n > max ? max : n)),
+                  centena: bichoItem.centena.map(n => (n > max ? max : n)),
+                  dezena: bichoItem.dezena.map(n => (n > max ? max : n)),
+               };
+            }
+
+            return item;
+         }),
+      };
+   }
+   private extractJson(raw: string): string {
+      let text = raw.trim();
+
+      text = text.replace(/^```(?:json)?/, '').replace(/```$/, '').trim();
+
+      const first = text.indexOf('{');
+      const last = text.lastIndexOf('}');
+      if (first === -1 || last === -1) {
+         this.logger.error('Nenhum JSON encontrado', raw);
+         throw new BadGatewayException('IA retornou resposta inesperada');
+      }
+
+      return text.slice(first, last + 1);
+   }
+
+   private parseAndValidate(raw: string): DreamAnalysis {
+      const jsonString = this.extractJson(raw);
+
+      let parsed: unknown;
+      try {
+         parsed = JSON.parse(jsonString);
+      } catch (err) {
+         this.logger.error('JSON inválido da IA', jsonString);
+         throw new BadGatewayException('Resposta da IA não é JSON válido');
+      }
+
+      const sanitized = this.sanitizeNumbers(parsed as DreamAnalysis);
 
       try {
-         const chatResponse = await this.mistralClient.chat.complete({
+         return DreamAnalysisSchema.parse(sanitized);
+      } catch (err) {
+         if (err instanceof ZodError) {
+            this.logger.error('Resposta da IA não corresponde ao schema', JSON.stringify(err));
+         }
+         throw new BadGatewayException('Resposta da IA não respeita o schema');
+      }
+   }
+
+   async analyzeDream(createDreamDto: CreateDreamDto): Promise<DreamAnalysis> {
+      let chatResponse;
+      try {
+         chatResponse = await this.mistralClient.chat.complete({
             model: this.MODEL,
             messages: [
                { role: 'system', content: this.SYSTEM_PROMPT },
-               { role: 'user', content: `O sonho a ser analisado é: "${dreamDescription}"` },
+               { role: 'user', content: createDreamDto.description },
             ],
          });
-
-         const rawContent = chatResponse.choices?.[0]?.message?.content;
-
-         if (!rawContent) throw new Error('Resposta inválida da Mistral');
-
-         return this.normalizeResponseHard(rawContent);
-
-      } catch (error) {
-         throw new InternalServerErrorException(
-            'Falha na comunicação com o serviço de Inteligência Artificial.'
-         );
+      } catch (err) {
+         this.logger.error('Erro na comunicação com Mistral', err);
+         throw new BadGatewayException('Falha ao se comunicar com IA');
       }
+
+      const raw = chatResponse.choices?.[0]?.message?.content;
+      if (!raw) {
+         this.logger.error('Resposta vazia da IA');
+         throw new BadGatewayException('IA retornou resposta vazia');
+      }
+
+      return this.parseAndValidate(raw);
    }
 
-   private normalizeResponseHard(aiOutput: string): any {
-      if (!aiOutput || typeof aiOutput !== "string") {
-         throw new Error("Resposta vazia da IA");
-      }
-
-      let cleaned = aiOutput
-         .replace(/```json/gi, "")
-         .replace(/```/g, "")
-         .trim();
-
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (jsonMatch) cleaned = jsonMatch[0];
-
-      cleaned = cleaned.replace(/"([^"]*)":\s*"([\s\S]*?)"/g, (m, key, value) => {
-         const singleLine = value.replace(/\s+/g, " ").trim();
-         return `"${key}": "${singleLine}"`;
-      });
-
-      let parsed;
-      try {
-         parsed = JSON.parse(cleaned);
-      } catch (e) {
-         console.error("JSON brabo da IA:", cleaned);
-         throw new Error("A IA retornou JSON inválido");
-      }
-
-      const normalizeNumbers = (v: any): any => {
-         if (Array.isArray(v)) return v.map(normalizeNumbers);
-
-         if (v && typeof v === "object") {
-            const obj: any = {};
-            for (const k of Object.keys(v)) {
-               obj[k] = normalizeNumbers(v[k]);
-            }
-            return obj;
-         }
-
-         if (typeof v === "string" && /^\d+$/.test(v)) {
-            return Number(v);
-         }
-
-         return v;
-      };
-
-      parsed = normalizeNumbers(parsed);
-
-      parsed.suggested_numbers = parsed.suggested_numbers?.map((item: any) => {
-         if (item.game === "Jogo do Bicho" && !item.bicho_details) {
-            const { animal, milhar, centena, dezena, rationale } = item;
-
-            item.bicho_details = { animal, milhar, centena, dezena };
-
-            delete item.animal;
-            delete item.milhar;
-            delete item.centena;
-            delete item.dezena;
-
-            item.tip = rationale || item.tip || "";
-            delete item.rationale;
-         }
-         return item;
-      });
-
-      return parsed;
-   }
 }

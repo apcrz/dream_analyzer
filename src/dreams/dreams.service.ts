@@ -1,28 +1,13 @@
 // src/dreams/dreams.service.ts
-
-import { Injectable, TooManyRequestsException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { AiService } from 'src/ai/ai.service';
 import { CreateDreamDto } from './dto/create-dream.dto';
-import { UpdateDreamDto } from './dto/update-dream.dto';
 
 @Injectable()
 export class DreamsService {
-  create(createDreamDto: CreateDreamDto) {
-    return 'This action adds a new dream';
-  }
+  constructor(private readonly aiService: AiService) { }
 
-  findAll() {
-    return `This action returns all dreams`;
-  }
-
-  findOne(id: number) {
-    return `This action returns a #${id} dream`;
-  }
-
-  update(id: number, updateDreamDto: UpdateDreamDto) {
-    return `This action updates a #${id} dream`;
-  }
-
-  remove(id: number) {
-    return `This action removes a #${id} dream`;
+  async analyzeDream(createDreamDto: CreateDreamDto) {
+    return this.aiService.analyzeDream(createDreamDto);
   }
 }
